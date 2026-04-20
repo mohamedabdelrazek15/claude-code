@@ -1,0 +1,32 @@
+.hidoom-gc-form {
+    border: 1px solid #e6d6a8;
+    background: #fffdf4;
+    padding: 18px 20px;
+    margin: 20px 0;
+    border-radius: 8px;
+}
+.hidoom-gc-form h3 {
+    margin: 0 0 12px;
+    color: #b8860b;
+    font-size: 18px;
+}
+.hidoom-gc-field {
+    margin-bottom: 12px;
+}
+.hidoom-gc-field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+.hidoom-gc-field input[type="text"],
+.hidoom-gc-field input[type="email"],
+.hidoom-gc-field textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+.hidoom-gc-field .required {
+    color: #b00;
+}
