@@ -9,12 +9,14 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Hidoom_GC_Admin {
 
-    const PAGE_SLUG = 'hidoom-gift-card';
+    const PAGE_SLUG        = 'hidoom-gift-card';
+    const LAST_ERROR_OPTION = 'hidoom_gc_last_error';
 
     public static function init() {
         add_action( 'admin_menu', array( __CLASS__, 'register_menu' ) );
-        add_action( 'admin_init', array( __CLASS__, 'handle_post' ) );
-        add_action( 'admin_init', array( __CLASS__, 'handle_test_email' ) );
+        add_action( 'admin_post_hidoom_gc_save', array( __CLASS__, 'handle_save' ) );
+        add_action( 'admin_post_hidoom_gc_test_email', array( __CLASS__, 'handle_test_email' ) );
+        add_action( 'admin_notices', array( __CLASS__, 'maybe_show_notice' ) );
     }
 
     public static function register_menu() {
@@ -28,12 +30,18 @@ class Hidoom_GC_Admin {
         );
     }
 
-    public static function handle_post() {
-        if ( empty( $_POST['hidoom_gc_save'] ) ) {
-            return;
-        }
+    protected static function redirect_with( $args ) {
+        $url = add_query_arg(
+            array_merge( array( 'page' => self::PAGE_SLUG ), $args ),
+            admin_url( 'admin.php' )
+        );
+        wp_safe_redirect( $url );
+        exit;
+    }
+
+    public static function handle_save() {
         if ( ! current_user_can( 'manage_woocommerce' ) ) {
-            return;
+            wp_die( esc_html__( 'You do not have permission.', 'hidoom-gift-card' ) );
         }
         check_admin_referer( 'hidoom_gc_save_settings' );
 
@@ -50,29 +58,25 @@ class Hidoom_GC_Admin {
 
         Hidoom_GC_Settings::update( $values );
         delete_option( Hidoom_GC_Gmail::TOKEN_OPTION );
+        delete_option( self::LAST_ERROR_OPTION );
 
-        add_action( 'admin_notices', function () {
-            echo '<div class="notice notice-success is-dismissible"><p>' .
-                esc_html__( 'Gift Card settings saved.', 'hidoom-gift-card' ) .
-                '</p></div>';
-        } );
+        self::redirect_with( array( 'hidoom_gc_notice' => 'saved' ) );
     }
 
     public static function handle_test_email() {
-        if ( empty( $_POST['hidoom_gc_test_email'] ) ) {
-            return;
-        }
         if ( ! current_user_can( 'manage_woocommerce' ) ) {
-            return;
+            wp_die( esc_html__( 'You do not have permission.', 'hidoom-gift-card' ) );
         }
         check_admin_referer( 'hidoom_gc_test_email' );
 
         $to = isset( $_POST['hidoom_gc_test_to'] ) ? sanitize_email( wp_unslash( $_POST['hidoom_gc_test_to'] ) ) : '';
         if ( ! is_email( $to ) ) {
-            add_action( 'admin_notices', function () {
-                echo '<div class="notice notice-error is-dismissible"><p>Invalid test recipient email.</p></div>';
-            } );
-            return;
+            self::redirect_with( array( 'hidoom_gc_notice' => 'bad_email' ) );
+        }
+
+        if ( ! Hidoom_GC_Gmail::is_configured() ) {
+            update_option( self::LAST_ERROR_OPTION, __( 'Gmail API is not configured. Save Client ID, Secret, Refresh Token, and From email first.', 'hidoom-gift-card' ) );
+            self::redirect_with( array( 'hidoom_gc_notice' => 'test_failed' ) );
         }
 
         $html = '<p>Hidoom Gift Cards test email. If you can read this, Gmail API is working.</p>'
@@ -81,19 +85,48 @@ class Hidoom_GC_Admin {
         $result = Hidoom_GC_Gmail::send( $to, '', 'Hidoom Gift Cards — Test', $html );
 
         if ( is_wp_error( $result ) ) {
-            $msg = esc_html( $result->get_error_message() );
-            add_action( 'admin_notices', function () use ( $msg ) {
-                echo '<div class="notice notice-error is-dismissible"><p>Test email failed: ' . $msg . '</p></div>';
-            } );
-        } else {
-            add_action( 'admin_notices', function () use ( $to ) {
-                echo '<div class="notice notice-success is-dismissible"><p>Test email sent to ' . esc_html( $to ) . '.</p></div>';
-            } );
+            update_option( self::LAST_ERROR_OPTION, $result->get_error_message() );
+            self::redirect_with( array( 'hidoom_gc_notice' => 'test_failed' ) );
+        }
+
+        delete_option( self::LAST_ERROR_OPTION );
+        self::redirect_with( array(
+            'hidoom_gc_notice' => 'test_ok',
+            'hidoom_gc_to'     => rawurlencode( $to ),
+        ) );
+    }
+
+    public static function maybe_show_notice() {
+        if ( empty( $_GET['page'] ) || self::PAGE_SLUG !== $_GET['page'] ) {
+            return;
+        }
+        $notice = isset( $_GET['hidoom_gc_notice'] ) ? sanitize_key( $_GET['hidoom_gc_notice'] ) : '';
+        if ( ! $notice ) {
+            return;
+        }
+
+        switch ( $notice ) {
+            case 'saved':
+                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Gift Card settings saved.', 'hidoom-gift-card' ) . '</p></div>';
+                break;
+            case 'bad_email':
+                echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( 'Invalid test recipient email.', 'hidoom-gift-card' ) . '</p></div>';
+                break;
+            case 'test_failed':
+                $msg = get_option( self::LAST_ERROR_OPTION, '' );
+                echo '<div class="notice notice-error is-dismissible"><p><strong>' . esc_html__( 'Test email failed:', 'hidoom-gift-card' ) . '</strong><br><code>' . esc_html( $msg ) . '</code></p></div>';
+                break;
+            case 'test_ok':
+                $to = isset( $_GET['hidoom_gc_to'] ) ? sanitize_email( rawurldecode( wp_unslash( $_GET['hidoom_gc_to'] ) ) ) : '';
+                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html( sprintf( __( 'Test email sent to %s.', 'hidoom-gift-card' ), $to ) ) . '</p></div>';
+                break;
         }
     }
 
     public static function render_page() {
-        $s = Hidoom_GC_Settings::get_all();
+        $s          = Hidoom_GC_Settings::get_all();
+        $last_error = get_option( self::LAST_ERROR_OPTION, '' );
+        $configured = Hidoom_GC_Gmail::is_configured();
         ?>
         <div class="wrap">
             <h1><?php esc_html_e( 'Hidoom Gift Cards', 'hidoom-gift-card' ); ?></h1>
@@ -101,7 +134,25 @@ class Hidoom_GC_Admin {
                 <?php esc_html_e( 'Configure the Gmail API credentials used to send gift card emails. Products in the "Gift Card" category will show the gift form automatically.', 'hidoom-gift-card' ); ?>
             </p>
 
-            <form method="post" action="">
+            <p>
+                <?php esc_html_e( 'Gmail API status:', 'hidoom-gift-card' ); ?>
+                <?php if ( $configured ) : ?>
+                    <strong style="color:#1a7f37;"><?php esc_html_e( 'Configured', 'hidoom-gift-card' ); ?></strong>
+                <?php else : ?>
+                    <strong style="color:#b00;"><?php esc_html_e( 'Not configured', 'hidoom-gift-card' ); ?></strong>
+                    <?php esc_html_e( '(fill in the 4 required fields below and click Save)', 'hidoom-gift-card' ); ?>
+                <?php endif; ?>
+            </p>
+
+            <?php if ( $last_error ) : ?>
+                <div class="notice notice-warning"><p>
+                    <strong><?php esc_html_e( 'Last Gmail error:', 'hidoom-gift-card' ); ?></strong><br>
+                    <code><?php echo esc_html( $last_error ); ?></code>
+                </p></div>
+            <?php endif; ?>
+
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                <input type="hidden" name="action" value="hidoom_gc_save">
                 <?php wp_nonce_field( 'hidoom_gc_save_settings' ); ?>
 
                 <h2><?php esc_html_e( 'Gmail API', 'hidoom-gift-card' ); ?></h2>
@@ -111,15 +162,15 @@ class Hidoom_GC_Admin {
                 <table class="form-table" role="presentation">
                     <tr>
                         <th scope="row"><label for="gmail_client_id"><?php esc_html_e( 'Client ID', 'hidoom-gift-card' ); ?></label></th>
-                        <td><input type="text" class="regular-text" id="gmail_client_id" name="gmail_client_id" value="<?php echo esc_attr( $s['gmail_client_id'] ); ?>"></td>
+                        <td><input type="text" class="regular-text" id="gmail_client_id" name="gmail_client_id" value="<?php echo esc_attr( $s['gmail_client_id'] ); ?>" autocomplete="off"></td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="gmail_client_secret"><?php esc_html_e( 'Client Secret', 'hidoom-gift-card' ); ?></label></th>
-                        <td><input type="password" class="regular-text" id="gmail_client_secret" name="gmail_client_secret" value="<?php echo esc_attr( $s['gmail_client_secret'] ); ?>"></td>
+                        <td><input type="text" class="regular-text" id="gmail_client_secret" name="gmail_client_secret" value="<?php echo esc_attr( $s['gmail_client_secret'] ); ?>" autocomplete="off"></td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="gmail_refresh_token"><?php esc_html_e( 'Refresh Token', 'hidoom-gift-card' ); ?></label></th>
-                        <td><input type="password" class="regular-text" id="gmail_refresh_token" name="gmail_refresh_token" value="<?php echo esc_attr( $s['gmail_refresh_token'] ); ?>"></td>
+                        <td><input type="text" class="regular-text" id="gmail_refresh_token" name="gmail_refresh_token" value="<?php echo esc_attr( $s['gmail_refresh_token'] ); ?>" autocomplete="off"></td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="gmail_from_email"><?php esc_html_e( 'From Email', 'hidoom-gift-card' ); ?></label></th>
@@ -151,32 +202,36 @@ class Hidoom_GC_Admin {
                 </table>
 
                 <p>
-                    <button type="submit" name="hidoom_gc_save" class="button button-primary"><?php esc_html_e( 'Save Settings', 'hidoom-gift-card' ); ?></button>
+                    <button type="submit" class="button button-primary"><?php esc_html_e( 'Save Settings', 'hidoom-gift-card' ); ?></button>
                 </p>
             </form>
 
             <hr>
             <h2><?php esc_html_e( 'Send Test Email', 'hidoom-gift-card' ); ?></h2>
-            <form method="post" action="">
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                <input type="hidden" name="action" value="hidoom_gc_test_email">
                 <?php wp_nonce_field( 'hidoom_gc_test_email' ); ?>
                 <p>
                     <input type="email" class="regular-text" name="hidoom_gc_test_to" placeholder="recipient@example.com" required>
-                    <button type="submit" name="hidoom_gc_test_email" class="button"><?php esc_html_e( 'Send Test', 'hidoom-gift-card' ); ?></button>
+                    <button type="submit" class="button"><?php esc_html_e( 'Send Test', 'hidoom-gift-card' ); ?></button>
                 </p>
                 <p class="description"><?php esc_html_e( 'Uses the Gmail API credentials saved above.', 'hidoom-gift-card' ); ?></p>
             </form>
 
             <hr>
+            <h2><?php esc_html_e( 'Troubleshooting', 'hidoom-gift-card' ); ?></h2>
+            <ul style="list-style:disc; padding-left:20px;">
+                <li><?php esc_html_e( 'If the test email fails with "invalid_grant", your refresh token is expired or revoked — in Google Cloud Console, publish the OAuth consent screen (move it out of Testing) or re-issue a token at developers.google.com/oauthplayground.', 'hidoom-gift-card' ); ?></li>
+                <li><?php esc_html_e( 'If you see "unauthorized_client", the Client ID and Secret do not match the project where Gmail API is enabled.', 'hidoom-gift-card' ); ?></li>
+                <li><?php esc_html_e( 'The refresh token must be obtained with scope https://www.googleapis.com/auth/gmail.send and while signed into the same Gmail account you entered in From Email.', 'hidoom-gift-card' ); ?></li>
+                <li><?php esc_html_e( 'The OAuth consent screen should be set to External. In Testing mode, add the From Email as a test user (published apps do not need this).', 'hidoom-gift-card' ); ?></li>
+            </ul>
+
             <h2><?php esc_html_e( 'Quick Reference', 'hidoom-gift-card' ); ?></h2>
             <ol>
-                <li><?php esc_html_e( 'Create 5 Simple products for each gift card value (e.g. $25, $50, $100...).', 'hidoom-gift-card' ); ?></li>
-                <li><?php
-                    printf(
-                        /* translators: %s: category slug */
-                        esc_html__( 'Assign them to the "Gift Card" category (slug: %s).', 'hidoom-gift-card' ),
-                        '<code>' . esc_html( HIDOOM_GC_CATEGORY_SLUG ) . '</code>'
-                    );
-                ?></li>
+                <li><?php esc_html_e( 'Create Simple products for each gift card value and assign them to the Gift Card category.', 'hidoom-gift-card' ); ?>
+                    <?php printf( '<code>%s</code>', esc_html( HIDOOM_GC_CATEGORY_SLUG ) ); ?>
+                </li>
                 <li><?php esc_html_e( 'Customers will see the gift card form on the product page automatically.', 'hidoom-gift-card' ); ?></li>
                 <li><?php esc_html_e( 'After payment, a one-time coupon is created and emailed to the receiver.', 'hidoom-gift-card' ); ?></li>
             </ol>

@@ -84,6 +84,7 @@ class Hidoom_GC_Order {
 
                 if ( is_wp_error( $send ) ) {
                     $order->add_order_note( 'Gift card email failed for ' . $receiver_email . ': ' . $send->get_error_message() );
+                    update_option( Hidoom_GC_Admin::LAST_ERROR_OPTION, $send->get_error_message() );
                 } else {
                     $order->add_order_note( sprintf( 'Gift card coupon %s emailed to %s.', $code, $receiver_email ) );
                 }
